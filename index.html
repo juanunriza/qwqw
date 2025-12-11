@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Expenses Tracker (Supabase)</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 760px; margin: 24px auto; padding: 0 16px; background:#f7f8fb; }
+    header { text-align:center; margin-bottom:18px; }
+    .card { background:white; padding:16px; border-radius:8px; box-shadow:0 2px 8px rgba(10,10,10,0.05); margin-bottom:12px; }
+    label { display:block; margin-top:8px; font-size:0.9rem; }
+    input, select { width:100%; padding:8px; margin-top:6px; border-radius:6px; border:1px solid #ddd; }
+    button { margin-top:12px; padding:10px 14px; background:#0066ff; color:white; border:none; border-radius:8px; cursor:pointer; width:100%; }
+    ul { padding:0; list-style:none; margin-top:12px; }
+    li { display:flex; justify-content:space-between; padding:10px; border-bottom:1px solid #f0f0f0; }
+    .muted { color:#666; font-size:0.9rem; }
+    .right { text-align:right; }
+    nav { display:flex; gap:8px; justify-content:center; margin-bottom:12px; }
+    .small { font-size:0.9rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Expenses Tracker (Supabase)</h1>
+    <p class="muted small">Sign in via magic link to record and view your expenses.</p>
+  </header>
+
+  <div class="card" id="auth-card">
+    <div id="auth-forms">
+      <label for="email">Email (magic link)</label>
+      <input id="email" type="email" placeholder="you@example.com" />
+      <button id="btn-signin">Send Magic Link</button>
+      <p id="auth-msg" class="muted small"></p>
+    </div>
+
+    <div id="signed-in" style="display:none;">
+      <p class="muted">Signed in as <span id="user-email"></span></p>
+      <nav>
+        <button id="btn-signout">Sign out</button>
+      </nav>
+    </div>
+  </div>
+
+  <div class="card" id="add-card" style="display:none;">
+    <h3>Add Expense</h3>
+    <label>Description / Merchant</label>
+    <input id="merchant" placeholder="Coffee, Grocery..." />
+    <label>Amount</label>
+    <input id="amount" type="number" step="0.01" placeholder="12.50" />
+    <label>Currency</label>
+    <input id="currency" value="USD" />
+    <label>Type</label>
+    <select id="type">
+      <option value="expense" selected>Expense</option>
+      <option value="income">Income</option>
+      <option value="transfer">Transfer</option>
+    </select>
+    <button id="btn-add">Add Transaction</button>
+    <p id="add-msg" class="muted small"></p>
+  </div>
+
+  <div class="card">
+    <h3>Your Transactions</h3>
+    <ul id="transactions-list"></ul>
+    <p id="empty-msg" class="muted" style="display:none;">No transactions yet.</p>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/supabase.min.js"></script>
+  <script>
+    // ===== Replace these placeholders with your values or inject via env/config =====
+    const SUPABASE_URL = "__SUPABASE_URL__";
+    const SUPABASE_ANON_KEY = "__SUPABASE_ANON_KEY__";
+    // =================================================================================
+
+    if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+      document.body.innerHTML = "<pre style='color:red;padding:20px'>ERROR: Please set SUPABASE_URL and SUPABASE_ANON_KEY in index.html (or inject via your deployment).</pre>";
+      throw new Error("Missing SUPABASE config");
+    }
+
+    const supabase = supabaseJs.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { auth: { persistSession: false } });
+
+    // UI elements
+    const emailEl = document.getElementById("email");
+    const btnSignIn = document.getElementById("btn-signin");
+    const authMsg = document.getElementById("auth-msg");
+    const signedInDiv = document.getElementById("signed-in");
+    const authFormsDiv = document.getElementById("auth-forms");
+    const userEmailSpan = document.getElementById("user-email");
+    const btnSignOut = document.getElementById("btn-signout");
+    const addCard = document.getElementById("add-card");
+    const merchantEl = document.getElementById("merchant");
+    const amountEl = document.getElementById("amount");
+    const currencyEl = document.getElementById("currency");
+    const typeEl = document.getElementById("type");
+    const btnAdd = document.getElementById("btn-add");
+    const addMsg = document.getElementById("add-msg");
+    const txList = document.getElementById("transactions-list");
+    const emptyMsg = document.getElementById("empty-msg");
+
+    let accessToken = null;
+
+    // Send magic link
+    btnSignIn.addEventListener("click", async () => {
+      const email = emailEl.value.trim();
+      if (!email) { authMsg.textContent = "Enter a valid email."; return; }
+      authMsg.textContent = "Sending magic link...";
+
+      const { error } = await supabase.auth.signInWithOtp({ email });
+      if (error) {
+        authMsg.textContent = "Error: " + error.message;
+      } else {
+        authMsg.textContent = "Magic link sent — check your email. After clicking the link, reload this page.";
+      }
+    });
+
+    // Sign out
+    btnSignOut.addEventListener("click", async () => {
+      await supabase.auth.signOut();
+      accessToken = null;
+      renderSignedOut();
+    });
+
+    // Add transaction
+    btnAdd.addEventListener("click", async () => {
+      addMsg.textContent = "";
+      const merchant = merchantEl.value.trim();
+      const amount = parseFloat(amountEl.value);
+      const currency = currencyEl.value.trim() || "USD";
+      const type = typeEl.value;
+
+      if (!merchant || isNaN(amount)) {
+        addMsg.textContent = "Please provide merchant and a numeric amount.";
+        return;
+      }
+
+      btnAdd.disabled = true;
+      btnAdd.textContent = "Adding...";
+
+      try {
+        const res = await fetch("/api/expenses", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer " + accessToken
+          },
+          body: JSON.stringify({
+            amount,
+            currency,
+            type,
+            merchant,
+            note: null
+          })
+        });
+        const body = await res.json();
+        if (!res.ok) {
+          addMsg.textContent = "Error: " + (body?.error || JSON.stringify(body));
+        } else {
+          addMsg.textContent = "Transaction added.";
+          merchantEl.value = "";
+          amountEl.value = "";
+          loadTransactions();
+        }
+      } catch (err) {
+        addMsg.textContent = "Network error: " + err.message;
+      } finally {
+        btnAdd.disabled = false;
+        btnAdd.textContent = "Add Transaction";
+      }
+    });
+
+    // Load transactions from API
+    async function loadTransactions() {
+      txList.innerHTML = "";
+      emptyMsg.style.display = "none";
+
+      try {
+        const res = await fetch("/api/expenses", {
+          headers: { Authorization: "Bearer " + accessToken }
+        });
+
+        if (res.status === 401) {
+          renderSignedOut();
+          return;
+        }
+
+        const data = await res.json();
+        if (!Array.isArray(data) || data.length === 0) {
+          emptyMsg.style.display = "block";
+          return;
+        }
+
+        data.forEach(tx => {
+          const li = document.createElement("li");
+          const left = document.createElement("div");
+          left.innerHTML = `<strong>${tx.merchant || (tx.note || 'No description')}</strong><div class="muted small">${new Date(tx.happened_at).toLocaleString()}</div>`;
+          const right = document.createElement("div");
+          right.className = "right";
+          right.innerHTML = `<div>$${Number(tx.amount).toFixed(2)} ${tx.currency || ''}</div><div class="muted small">${tx.type}</div>`;
+          li.appendChild(left);
+          li.appendChild(right);
+          txList.appendChild(li);
+        });
+
+      } catch (err) {
+        emptyMsg.style.display = "block";
+        emptyMsg.textContent = "Failed to load transactions: " + err.message;
+      }
+    }
+
+    // Render signed-in UI
+    function renderSignedIn(email, token) {
+      authFormsDiv.style.display = "none";
+      signedInDiv.style.display = "";
+      userEmailSpan.textContent = email;
+      addCard.style.display = "";
+      accessToken = token;
+      loadTransactions();
+    }
+
+    // Render signed-out UI
+    function renderSignedOut() {
+      authFormsDiv.style.display = "";
+      signedInDiv.style.display = "none";
+      addCard.style.display = "none";
+      userEmailSpan.textContent = "";
+      accessToken = null;
+      txList.innerHTML = "";
+    }
+
+    // On page load: check for session (the magic link opens page with access_token in URL fragment)
+    (async function init() {
+      // Try to get session from URL (after magic link the user will be redirected back with access_token in hash)
+      const urlHash = window.location.hash;
+      if (urlHash && urlHash.includes("access_token")) {
+        // parse access_token from hash
+        const params = new URLSearchParams(urlHash.replace(/^#/, ""));
+        const token = params.get("access_token");
+        if (token) {
+          // Set session in the client via setSession
+          await supabase.auth.setSession({ access_token: token });
+          // Clean URL (remove tokens)
+          history.replaceState(null, "", location.pathname + location.search);
+        }
+      }
+
+      // Get current session if any
+      const { data } = await supabase.auth.getSession();
+      const session = data?.session;
+      if (session) {
+        // we have a logged-in user
+        renderSignedIn(session.user.email, session.access_token);
+      } else {
+        renderSignedOut();
+      }
+
+      // Listen to auth state changes (optional)
+      supabase.auth.onAuthStateChange((event, context) => {
+        // When user completes magic link sign-in in another tab, reload to pick up session
+        if (event === "SIGNED_IN") {
+          window.location.reload();
+        }
+      });
+    })();
+  </script>
+</body>
+</html>
